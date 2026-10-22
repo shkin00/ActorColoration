@@ -21,7 +21,10 @@ Machine-specific paths (engine, test project, build commands) live in `CLAUDE.lo
 - Handlers are registered in the module's `StartupModule` and unregistered by name in `ShutdownModule`. The View Mode
   menu lists registered handlers each time it is built, so no editor subsystem is needed.
 - A handler's color is computed when the mode is activated and whenever a primitive's scene proxy is created; it is not
-  re-evaluated every frame.
+  re-evaluated every frame. View Mode > Actor Coloration > Refresh Colors (or the console command
+  `ActorColoration.Refresh`) recomputes the active mode's colors in the editor and PIE worlds without running its
+  `ActivateFunc` again. The entry is added by extending the tool menu
+  `LevelEditor.ViewportToolbar.ViewModes.VisualizeActorColorationViewMode`.
 - Level editor viewports switch modes only through View Mode > Actor Coloration. The console command
   `SHOW ACTORCOLORATION <HANDLERNAME>` is handled by `UGameViewportClient`, so it applies to game viewports (PIE).
 

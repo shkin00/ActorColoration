@@ -1,12 +1,17 @@
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/SplineMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "EditorSupportDelegates.h"
+#include "Engine/Engine.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/ActorPrimitiveColorHandler.h"
+#include "HAL/IConsoleManager.h"
 #include "LandscapeSplinesComponent.h"
 #include "Modules/ModuleManager.h"
+#include "ToolMenus.h"
 
 #define LOCTEXT_NAMESPACE "ActorColoration"
 
@@ -17,6 +22,7 @@ namespace ActorColoration
 	static const FName MobilityHandlerName(TEXT("Mobility"));
 	static const FName LandscapeSplineMeshesHandlerName(TEXT("LandscapeSplineMeshes"));
 	static const FName NavigationRelevantHandlerName(TEXT("NavigationRelevant"));
+	static const FName CullDistanceHandlerName(TEXT("CullDistance"));
 
 	// Red for non-Nanite static and skeletal meshes with a single LOD, grey for everything else.
 	static FLinearColor GetMissingLODsColor(const UPrimitiveComponent* PrimitiveComponent)
@@ -100,6 +106,47 @@ namespace ActorColoration
 		return FLinearColor::Gray;
 	}
 
+	// Red for primitives that are never distance culled, yellow beyond 500 m, green beyond 100 m, grey within 100 m.
+	// Primitives in an HLOD cluster use the distance at which the HLOD replaces them; instanced meshes also use their
+	// per-instance cull distance.
+	static FLinearColor GetCullDistanceColor(const UPrimitiveComponent* PrimitiveComponent)
+	{
+		// The distance the renderer culls at: desired max draw distance, cull distance volumes and Never Distance Cull.
+		// 0 means never.
+		float CullDistance = PrimitiveComponent->CachedMaxDrawDistance;
+
+		const UPrimitiveComponent* LODParent = PrimitiveComponent->GetLODParentPrimitive();
+		if (LODParent && LODParent->MinDrawDistance > 0.0f)
+		{
+			CullDistance = LODParent->MinDrawDistance;
+		}
+
+		if (const UInstancedStaticMeshComponent* InstancedComponent = Cast<UInstancedStaticMeshComponent>(PrimitiveComponent))
+		{
+			int32 InstanceStartCullDistance = 0;
+			int32 InstanceEndCullDistance = 0;
+			InstancedComponent->GetCullDistances(InstanceStartCullDistance, InstanceEndCullDistance);
+			if (InstanceEndCullDistance > 0)
+			{
+				CullDistance = CullDistance > 0.0f ? FMath::Min(CullDistance, float(InstanceEndCullDistance)) : float(InstanceEndCullDistance);
+			}
+		}
+
+		if (CullDistance <= 0.0f)
+		{
+			return FLinearColor::Red;
+		}
+		if (CullDistance > 50000.0f)
+		{
+			return FLinearColor::Yellow;
+		}
+		if (CullDistance > 10000.0f)
+		{
+			return FLinearColor::Green;
+		}
+		return FLinearColor::Gray;
+	}
+
 	// Shifts the brightness by a random amount so that neighbouring primitives of the same color stay distinguishable.
 	static FLinearColor AddPrimitiveVariation(const FLinearColor& Color)
 	{
@@ -119,6 +166,33 @@ namespace ActorColoration
 		};
 		FActorPrimitiveColorHandler::Get().RegisterPrimitiveColorHandler(Handler);
 	}
+
+	// Recomputes the active mode's colors in the editor and PIE worlds. Colors are otherwise only computed when a mode
+	// is activated and when a primitive's render state is created. Editing a component re-registers it, but changes
+	// that reach a primitive another way don't show, such as an edited cull distance volume. The mode's ActivateFunc is
+	// not run again.
+	static void RefreshActiveHandler()
+	{
+		const FName ActiveHandlerName = FActorPrimitiveColorHandler::Get().GetActivePrimitiveColorHandler();
+		if (ActiveHandlerName.IsNone())
+		{
+			return;
+		}
+		for (const FWorldContext& WorldContext : GEngine->GetWorldContexts())
+		{
+			UWorld* World = WorldContext.World();
+			if (World && (WorldContext.WorldType == EWorldType::Editor || WorldContext.WorldType == EWorldType::PIE))
+			{
+				FActorPrimitiveColorHandler::Get().RefreshPrimitiveColorHandler(ActiveHandlerName, World);
+			}
+		}
+		FEditorSupportDelegates::RedrawAllViewports.Broadcast();
+	}
+
+	static FAutoConsoleCommand RefreshCommand(
+		TEXT("ActorColoration.Refresh"),
+		TEXT("Recomputes the colors of the active actor coloration mode in the editor and PIE worlds."),
+		FConsoleCommandDelegate::CreateStatic(&RefreshActiveHandler));
 }
 
 class FActorColorationModule : public IModuleInterface
@@ -151,15 +225,50 @@ public:
 			LOCTEXT("NavigationRelevant", "Navigation Relevant"),
 			LOCTEXT("NavigationRelevant_ToolTip", "Red: actors with a navigation relevant component, including components that are not drawn, such as landscape collision. Grey: everything else."),
 			&ActorColoration::GetNavigationRelevantColor);
+		ActorColoration::RegisterHandler(
+			ActorColoration::CullDistanceHandlerName,
+			LOCTEXT("CullDistance", "Cull Distance"),
+			LOCTEXT("CullDistance_ToolTip", "Distance at which the primitive is culled or replaced by its HLOD, including cull distance volumes. Red: never. Yellow: beyond 500 m. Green: 100-500 m. Grey: within 100 m."),
+			&ActorColoration::GetCullDistanceColor);
+
+		UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FActorColorationModule::RegisterMenus));
 	}
 
 	virtual void ShutdownModule() override
 	{
+		UToolMenus::UnRegisterStartupCallback(this);
+		UToolMenus::UnregisterOwner(this);
+
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::MissingLODsHandlerName);
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::DetailModeHandlerName);
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::MobilityHandlerName);
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::LandscapeSplineMeshesHandlerName);
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::NavigationRelevantHandlerName);
+		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::CullDistanceHandlerName);
+	}
+
+private:
+	// Adds Refresh Colors below the mode list in the level viewport's View Mode > Actor Coloration submenu.
+	void RegisterMenus()
+	{
+		FToolMenuOwnerScoped OwnerScoped(this);
+
+		UToolMenu* Menu = UToolMenus::Get()->ExtendMenu("LevelEditor.ViewportToolbar.ViewModes.VisualizeActorColorationViewMode");
+		FToolMenuSection& Section = Menu->AddSection(
+			"ActorColorationRefresh",
+			FText::GetEmpty(),
+			FToolMenuInsert("LevelViewportActorColoration", EToolMenuInsertType::After));
+		Section.AddMenuEntry(
+			"RefreshColors",
+			LOCTEXT("RefreshColors", "Refresh Colors"),
+			LOCTEXT("RefreshColors_ToolTip", "Recompute the active mode's colors, for example after editing a cull distance volume. Same as the ActorColoration.Refresh console command."),
+			FSlateIcon(),
+			FUIAction(
+				FExecuteAction::CreateStatic(&ActorColoration::RefreshActiveHandler),
+				FCanExecuteAction::CreateLambda([]()
+				{
+					return !FActorPrimitiveColorHandler::Get().GetActivePrimitiveColorHandler().IsNone();
+				})));
 	}
 };
 
