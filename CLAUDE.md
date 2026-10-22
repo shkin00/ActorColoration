@@ -23,8 +23,8 @@ Machine-specific paths (engine, test project, build commands) live in `CLAUDE.lo
 - A handler's color is computed when the mode is activated and whenever a primitive's scene proxy is created; it is not
   re-evaluated every frame. View Mode > Actor Coloration > Refresh Colors (or the console command
   `ActorColoration.Refresh`) recomputes the active mode's colors in the editor and PIE worlds without running its
-  `ActivateFunc` again. The entry is added by extending the tool menu
-  `LevelEditor.ViewportToolbar.ViewModes.VisualizeActorColorationViewMode`.
+  `ActivateFunc` again; for Instancing Candidates it recounts the copies first. The entry is added by extending the tool
+  menu `LevelEditor.ViewportToolbar.ViewModes.VisualizeActorColorationViewMode`.
 - Level editor viewports switch modes only through View Mode > Actor Coloration. The console command
   `SHOW ACTORCOLORATION <HANDLERNAME>` is handled by `UGameViewportClient`, so it applies to game viewports (PIE).
 

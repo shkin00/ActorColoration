@@ -4,14 +4,18 @@
 #include "Components/StaticMeshComponent.h"
 #include "EditorSupportDelegates.h"
 #include "Engine/Engine.h"
+#include "Engine/Level.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
+#include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/ActorPrimitiveColorHandler.h"
 #include "HAL/IConsoleManager.h"
 #include "LandscapeSplinesComponent.h"
+#include "Materials/MaterialInterface.h"
 #include "Modules/ModuleManager.h"
 #include "ToolMenus.h"
+#include "UObject/ObjectKey.h"
 
 #define LOCTEXT_NAMESPACE "ActorColoration"
 
@@ -23,6 +27,7 @@ namespace ActorColoration
 	static const FName LandscapeSplineMeshesHandlerName(TEXT("LandscapeSplineMeshes"));
 	static const FName NavigationRelevantHandlerName(TEXT("NavigationRelevant"));
 	static const FName CullDistanceHandlerName(TEXT("CullDistance"));
+	static const FName InstancingCandidatesHandlerName(TEXT("InstancingCandidates"));
 
 	// Red for non-Nanite static and skeletal meshes with a single LOD, grey for everything else.
 	static FLinearColor GetMissingLODsColor(const UPrimitiveComponent* PrimitiveComponent)
@@ -147,6 +152,107 @@ namespace ActorColoration
 		return FLinearColor::Gray;
 	}
 
+	// Static mesh components that could share one instanced component: same level, mesh and materials.
+	struct FInstancingKey
+	{
+		TObjectKey<ULevel> Level;
+		TObjectKey<UStaticMesh> StaticMesh;
+		TArray<TObjectKey<UMaterialInterface>> Materials;
+
+		bool operator==(const FInstancingKey& Other) const
+		{
+			return Level == Other.Level && StaticMesh == Other.StaticMesh && Materials == Other.Materials;
+		}
+
+		friend uint32 GetTypeHash(const FInstancingKey& Key)
+		{
+			uint32 Hash = HashCombine(GetTypeHash(Key.Level), GetTypeHash(Key.StaticMesh));
+			for (const TObjectKey<UMaterialInterface>& Material : Key.Materials)
+			{
+				Hash = HashCombine(Hash, GetTypeHash(Material));
+			}
+			return Hash;
+		}
+	};
+
+	// Copies per key, counted when the Instancing Candidates mode is activated or refreshed.
+	static TMap<FInstancingKey, int32> StaticMeshCopyCounts;
+
+	// Plain, visible, static mobility static mesh components; instanced and spline meshes are excluded.
+	static bool IsInstancingCandidate(const UStaticMeshComponent* StaticMeshComponent)
+	{
+		return !StaticMeshComponent->IsA<UInstancedStaticMeshComponent>()
+			&& !StaticMeshComponent->IsA<USplineMeshComponent>()
+			&& StaticMeshComponent->GetStaticMesh()
+			&& StaticMeshComponent->GetMobility() == EComponentMobility::Static
+			&& StaticMeshComponent->IsVisible()
+			&& !StaticMeshComponent->IsEditorOnly();
+	}
+
+	static FInstancingKey MakeInstancingKey(const UStaticMeshComponent* StaticMeshComponent)
+	{
+		FInstancingKey Key;
+		Key.Level = StaticMeshComponent->GetComponentLevel();
+		Key.StaticMesh = StaticMeshComponent->GetStaticMesh();
+		for (int32 MaterialIndex = 0; MaterialIndex < StaticMeshComponent->GetNumMaterials(); ++MaterialIndex)
+		{
+			Key.Materials.Add(StaticMeshComponent->GetMaterial(MaterialIndex));
+		}
+		return Key;
+	}
+
+	static void CountStaticMeshCopies()
+	{
+		StaticMeshCopyCounts.Reset();
+		for (const FWorldContext& WorldContext : GEngine->GetWorldContexts())
+		{
+			UWorld* World = WorldContext.World();
+			if (!World || (WorldContext.WorldType != EWorldType::Editor && WorldContext.WorldType != EWorldType::PIE))
+			{
+				continue;
+			}
+			for (TActorIterator<AActor> It(World); It; ++It)
+			{
+				It->ForEachComponent<UStaticMeshComponent>(false, [](const UStaticMeshComponent* StaticMeshComponent)
+				{
+					if (StaticMeshComponent->IsRegistered() && IsInstancingCandidate(StaticMeshComponent))
+					{
+						++StaticMeshCopyCounts.FindOrAdd(MakeInstancingKey(StaticMeshComponent));
+					}
+				});
+			}
+		}
+	}
+
+	static void ClearStaticMeshCopies()
+	{
+		StaticMeshCopyCounts.Empty();
+	}
+
+	// Red for static mesh components with 20 or more copies in their level, yellow for 5-19, green for components that
+	// are already instanced, grey for everything else.
+	static FLinearColor GetInstancingCandidatesColor(const UPrimitiveComponent* PrimitiveComponent)
+	{
+		if (PrimitiveComponent->IsA<UInstancedStaticMeshComponent>())
+		{
+			return FLinearColor::Green;
+		}
+		const UStaticMeshComponent* StaticMeshComponent = Cast<UStaticMeshComponent>(PrimitiveComponent);
+		if (StaticMeshComponent && IsInstancingCandidate(StaticMeshComponent))
+		{
+			const int32* NumCopies = StaticMeshCopyCounts.Find(MakeInstancingKey(StaticMeshComponent));
+			if (NumCopies && *NumCopies >= 20)
+			{
+				return FLinearColor::Red;
+			}
+			if (NumCopies && *NumCopies >= 5)
+			{
+				return FLinearColor::Yellow;
+			}
+		}
+		return FLinearColor::Gray;
+	}
+
 	// Shifts the brightness by a random amount so that neighbouring primitives of the same color stay distinguishable.
 	static FLinearColor AddPrimitiveVariation(const FLinearColor& Color)
 	{
@@ -154,7 +260,8 @@ namespace ActorColoration
 		return (Color + FLinearColor(Offset, Offset, Offset, 0.0f)).GetClamped();
 	}
 
-	static void RegisterHandler(FName HandlerName, const FText& HandlerText, const FText& HandlerToolTipText, FLinearColor (*GetColor)(const UPrimitiveComponent*))
+	static void RegisterHandler(FName HandlerName, const FText& HandlerText, const FText& HandlerToolTipText, FLinearColor (*GetColor)(const UPrimitiveComponent*),
+		void (*Activate)() = nullptr, void (*Deactivate)() = nullptr)
 	{
 		FActorPrimitiveColorHandler::FPrimitiveColorHandler Handler;
 		Handler.HandlerName = HandlerName;
@@ -164,19 +271,31 @@ namespace ActorColoration
 		{
 			return AddPrimitiveVariation(GetColor(PrimitiveComponent));
 		};
+		if (Activate)
+		{
+			Handler.ActivateFunc = Activate;
+		}
+		if (Deactivate)
+		{
+			Handler.DeactivateFunc = Deactivate;
+		}
 		FActorPrimitiveColorHandler::Get().RegisterPrimitiveColorHandler(Handler);
 	}
 
 	// Recomputes the active mode's colors in the editor and PIE worlds. Colors are otherwise only computed when a mode
 	// is activated and when a primitive's render state is created. Editing a component re-registers it, but changes
-	// that reach a primitive another way don't show, such as an edited cull distance volume. The mode's ActivateFunc is
-	// not run again.
+	// that reach a primitive another way don't show, such as an edited cull distance volume. A mode's ActivateFunc is
+	// not run again; Instancing Candidates recounts its copies instead.
 	static void RefreshActiveHandler()
 	{
 		const FName ActiveHandlerName = FActorPrimitiveColorHandler::Get().GetActivePrimitiveColorHandler();
 		if (ActiveHandlerName.IsNone())
 		{
 			return;
+		}
+		if (ActiveHandlerName == InstancingCandidatesHandlerName)
+		{
+			CountStaticMeshCopies();
 		}
 		for (const FWorldContext& WorldContext : GEngine->GetWorldContexts())
 		{
@@ -230,6 +349,13 @@ public:
 			LOCTEXT("CullDistance", "Cull Distance"),
 			LOCTEXT("CullDistance_ToolTip", "Distance at which the primitive is culled or replaced by its HLOD, including cull distance volumes. Red: never. Yellow: beyond 500 m. Green: 100-500 m. Grey: within 100 m."),
 			&ActorColoration::GetCullDistanceColor);
+		ActorColoration::RegisterHandler(
+			ActorColoration::InstancingCandidatesHandlerName,
+			LOCTEXT("InstancingCandidates", "Instancing Candidates"),
+			LOCTEXT("InstancingCandidates_ToolTip", "Copies of static mobility static mesh components with the same mesh and materials in the same level, counted when the mode is selected or refreshed. Red: 20 or more. Yellow: 5-19. Green: already instanced, such as foliage. Grey: everything else."),
+			&ActorColoration::GetInstancingCandidatesColor,
+			&ActorColoration::CountStaticMeshCopies,
+			&ActorColoration::ClearStaticMeshCopies);
 
 		UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FActorColorationModule::RegisterMenus));
 	}
@@ -245,6 +371,7 @@ public:
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::LandscapeSplineMeshesHandlerName);
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::NavigationRelevantHandlerName);
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::CullDistanceHandlerName);
+		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::InstancingCandidatesHandlerName);
 	}
 
 private:
