@@ -3,6 +3,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
+#include "GameFramework/Actor.h"
 #include "GameFramework/ActorPrimitiveColorHandler.h"
 #include "LandscapeSplinesComponent.h"
 #include "Modules/ModuleManager.h"
@@ -15,6 +16,7 @@ namespace ActorColoration
 	static const FName DetailModeHandlerName(TEXT("DetailMode"));
 	static const FName MobilityHandlerName(TEXT("Mobility"));
 	static const FName LandscapeSplineMeshesHandlerName(TEXT("LandscapeSplineMeshes"));
+	static const FName NavigationRelevantHandlerName(TEXT("NavigationRelevant"));
 
 	// Red for non-Nanite static and skeletal meshes with a single LOD, grey for everything else.
 	static FLinearColor GetMissingLODsColor(const UPrimitiveComponent* PrimitiveComponent)
@@ -78,6 +80,26 @@ namespace ActorColoration
 		return FLinearColor::Gray;
 	}
 
+	// Red for primitives whose owning actor has a navigation relevant primitive component, grey for everything else.
+	// The whole actor is tested because navigation often comes from components that are not drawn, such as landscape
+	// collision.
+	static FLinearColor GetNavigationRelevantColor(const UPrimitiveComponent* PrimitiveComponent)
+	{
+		const AActor* Owner = PrimitiveComponent->GetOwner();
+		if (!Owner)
+		{
+			return PrimitiveComponent->IsNavigationRelevant() ? FLinearColor::Red : FLinearColor::Gray;
+		}
+		for (const UPrimitiveComponent* Component : TInlineComponentArray<UPrimitiveComponent*>(Owner))
+		{
+			if (Component->IsNavigationRelevant())
+			{
+				return FLinearColor::Red;
+			}
+		}
+		return FLinearColor::Gray;
+	}
+
 	// Shifts the brightness by a random amount so that neighbouring primitives of the same color stay distinguishable.
 	static FLinearColor AddPrimitiveVariation(const FLinearColor& Color)
 	{
@@ -124,6 +146,11 @@ public:
 			LOCTEXT("LandscapeSplineMeshes", "Landscape Spline Meshes"),
 			LOCTEXT("LandscapeSplineMeshes_ToolTip", "Red: meshes placed along landscape spline segments. Grey: everything else, including control point meshes."),
 			&ActorColoration::GetLandscapeSplineMeshesColor);
+		ActorColoration::RegisterHandler(
+			ActorColoration::NavigationRelevantHandlerName,
+			LOCTEXT("NavigationRelevant", "Navigation Relevant"),
+			LOCTEXT("NavigationRelevant_ToolTip", "Red: actors with a navigation relevant component, including components that are not drawn, such as landscape collision. Grey: everything else."),
+			&ActorColoration::GetNavigationRelevantColor);
 	}
 
 	virtual void ShutdownModule() override
@@ -132,6 +159,7 @@ public:
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::DetailModeHandlerName);
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::MobilityHandlerName);
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::LandscapeSplineMeshesHandlerName);
+		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::NavigationRelevantHandlerName);
 	}
 };
 
