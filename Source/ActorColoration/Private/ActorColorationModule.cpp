@@ -11,6 +11,7 @@ namespace ActorColoration
 {
 	static const FName MissingLODsHandlerName(TEXT("MissingLODs"));
 	static const FName DetailModeHandlerName(TEXT("DetailMode"));
+	static const FName MobilityHandlerName(TEXT("Mobility"));
 
 	// Red for non-Nanite static and skeletal meshes with a single LOD, grey for everything else.
 	static FLinearColor GetMissingLODsColor(const UPrimitiveComponent* PrimitiveComponent)
@@ -45,6 +46,20 @@ namespace ActorColoration
 			return FLinearColor::Yellow;
 		case DM_Medium:
 			return FLinearColor::Green;
+		default:
+			return FLinearColor::Gray;
+		}
+	}
+
+	// Red for Movable, yellow for Stationary, grey for Static.
+	static FLinearColor GetMobilityColor(const UPrimitiveComponent* PrimitiveComponent)
+	{
+		switch (PrimitiveComponent->GetMobility())
+		{
+		case EComponentMobility::Movable:
+			return FLinearColor::Red;
+		case EComponentMobility::Stationary:
+			return FLinearColor::Yellow;
 		default:
 			return FLinearColor::Gray;
 		}
@@ -86,12 +101,18 @@ public:
 			LOCTEXT("DetailMode", "Detail Mode"),
 			LOCTEXT("DetailMode_ToolTip", "Component detail mode. Red: Epic. Yellow: High. Green: Medium. Grey: Low. Components above the current r.DetailMode are not drawn."),
 			&ActorColoration::GetDetailModeColor);
+		ActorColoration::RegisterHandler(
+			ActorColoration::MobilityHandlerName,
+			LOCTEXT("Mobility", "Mobility"),
+			LOCTEXT("Mobility_ToolTip", "Component mobility. Red: Movable. Yellow: Stationary. Grey: Static."),
+			&ActorColoration::GetMobilityColor);
 	}
 
 	virtual void ShutdownModule() override
 	{
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::MissingLODsHandlerName);
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::DetailModeHandlerName);
+		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::MobilityHandlerName);
 	}
 };
 
