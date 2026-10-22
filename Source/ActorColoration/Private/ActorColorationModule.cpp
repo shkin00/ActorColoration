@@ -1,8 +1,10 @@
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/SplineMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "GameFramework/ActorPrimitiveColorHandler.h"
+#include "LandscapeSplinesComponent.h"
 #include "Modules/ModuleManager.h"
 
 #define LOCTEXT_NAMESPACE "ActorColoration"
@@ -12,6 +14,7 @@ namespace ActorColoration
 	static const FName MissingLODsHandlerName(TEXT("MissingLODs"));
 	static const FName DetailModeHandlerName(TEXT("DetailMode"));
 	static const FName MobilityHandlerName(TEXT("Mobility"));
+	static const FName LandscapeSplineMeshesHandlerName(TEXT("LandscapeSplineMeshes"));
 
 	// Red for non-Nanite static and skeletal meshes with a single LOD, grey for everything else.
 	static FLinearColor GetMissingLODsColor(const UPrimitiveComponent* PrimitiveComponent)
@@ -65,6 +68,16 @@ namespace ActorColoration
 		}
 	}
 
+	// Red for spline mesh components placed by landscape spline segments, grey for everything else.
+	static FLinearColor GetLandscapeSplineMeshesColor(const UPrimitiveComponent* PrimitiveComponent)
+	{
+		if (PrimitiveComponent->IsA<USplineMeshComponent>() && Cast<ULandscapeSplinesComponent>(PrimitiveComponent->GetAttachParent()))
+		{
+			return FLinearColor::Red;
+		}
+		return FLinearColor::Gray;
+	}
+
 	// Shifts the brightness by a random amount so that neighbouring primitives of the same color stay distinguishable.
 	static FLinearColor AddPrimitiveVariation(const FLinearColor& Color)
 	{
@@ -106,6 +119,11 @@ public:
 			LOCTEXT("Mobility", "Mobility"),
 			LOCTEXT("Mobility_ToolTip", "Component mobility. Red: Movable. Yellow: Stationary. Grey: Static."),
 			&ActorColoration::GetMobilityColor);
+		ActorColoration::RegisterHandler(
+			ActorColoration::LandscapeSplineMeshesHandlerName,
+			LOCTEXT("LandscapeSplineMeshes", "Landscape Spline Meshes"),
+			LOCTEXT("LandscapeSplineMeshes_ToolTip", "Red: meshes placed along landscape spline segments. Grey: everything else, including control point meshes."),
+			&ActorColoration::GetLandscapeSplineMeshesColor);
 	}
 
 	virtual void ShutdownModule() override
@@ -113,6 +131,7 @@ public:
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::MissingLODsHandlerName);
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::DetailModeHandlerName);
 		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::MobilityHandlerName);
+		FActorPrimitiveColorHandler::Get().UnregisterPrimitiveColorHandler(ActorColoration::LandscapeSplineMeshesHandlerName);
 	}
 };
 
