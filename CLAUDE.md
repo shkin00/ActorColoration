@@ -34,6 +34,10 @@ Machine-specific paths (engine, test project, build commands) live in `CLAUDE.lo
   into packaged games.
 - `Source/ActorColoration/` - module code. Implementation goes in `Private/`; add `Public/` only for API that other
   modules use.
+- `Tools/Update-VendoredCopy.ps1` - copies a committed revision into a Perforce or SVN workspace (`-Vcs Perforce|Svn`).
+  It must run in Windows PowerShell 5.1 and stay ASCII (5.1 reads BOM-less scripts in the ANSI code page). It refuses a
+  target that is a junction, inside this repo or in a git working tree. The SVN path was tested against a local
+  `file://` repository; the Perforce path has not been run against a server.
 
 ## Build
 
